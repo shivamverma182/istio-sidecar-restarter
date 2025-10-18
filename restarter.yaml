@@ -56,9 +56,6 @@ spec:
             app: istio-sidecar-restarter
         spec:
           serviceAccountName: istio-sidecar-restarter
-          imagePullPolicy: Always
-          # imagePullSecrets:
-          # - name: dockerconfigjson-github-com
           containers:
             - name: pod-restarter
               image: ghcr.io/shivamverma182/istio-sidecar-restarter:main
