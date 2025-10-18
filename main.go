@@ -5,14 +5,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"path/filepath"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/homedir"
+	"k8s.io/client-go/rest"
 )
 
 // WorkloadType represents the type of Kubernetes workload
@@ -37,41 +35,23 @@ var istioWorkloads = []IstioWorkload{
 }
 
 var istioNamespace = "istio-system"
-var namespaces []string
-
-// setupClient initializes the Kubernetes client configuration
-func setupClient(kubeconfigPath string) (*kubernetes.Clientset, error) {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
-	if err != nil {
-		return nil, fmt.Errorf("error building kubeconfig: %v", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("error creating kubernetes client: %v", err)
-	}
-
-	return clientset, nil
-}
 
 func main() {
 	// Get kubeconfig path
-	var kubeconfig string
-	if home := homedir.HomeDir(); home != "" {
-		flag.StringVar(&kubeconfig, "kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
-	} else {
-		flag.StringVar(&kubeconfig, "kubeconfig", "", "absolute path to the kubeconfig file")
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		panic(err.Error())
+	}
+
+	// Setup kubernetes client
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		panic(err.Error())
 	}
 
 	namespace := flag.String("namespace", "", "namespace to search pods in")
 	allNamespaces := flag.Bool("all-namespaces", false, "search pods in all namespaces")
 	flag.Parse()
-
-	// Setup kubernetes client
-	clientset, err := setupClient(kubeconfig)
-	if err != nil {
-		log.Fatalf("Failed to setup kubernetes client: %v", err)
-	}
 
 	// Handle Istio workload restarts
 	for _, workload := range istioWorkloads {
