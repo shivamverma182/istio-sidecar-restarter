@@ -1,12 +1,12 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
-  name: nginx-deployment
+  name: nginx-daemonset
   labels:
     app: nginx
-  namespace: test
+  namespace: test-1
 spec:
-  replicas: 1
+  # replicas: 1
   selector:
     matchLabels:
       app: nginx
@@ -53,7 +53,7 @@ metadata:
   name: nginx-ds
   labels:
     app: nginx
-  namespace: test
+  namespace: test-1
 spec:
   type: ClusterIP
   selector:
