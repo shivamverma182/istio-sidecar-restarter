@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o pod-restarter
 FROM alpine:3.18
 
 # Add CA certificates for HTTPS
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates bash
 
 # Create non-root user
 RUN adduser -D -u 10001 appuser
