@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 )
 
@@ -36,6 +39,16 @@ var istioWorkloads = []IstioWorkload{
 
 var istioNamespace = "istio-system"
 
+var (
+	podGVR         = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+	namespaceGVR   = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"}
+	deploymentGVR  = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	daemonsetGVR   = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}
+	statefulsetGVR = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "statefulsets"}
+	replicasetGVR  = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+	rolloutGVR     = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "rollouts"}
+)
+
 func main() {
 	// Parse command line flags
 	namespace := flag.String("namespace", "", "namespace to search pods in")
@@ -53,9 +66,9 @@ func main() {
 		log.Fatalf("Failed to get in-cluster config: %v", err)
 	}
 
-	clientset, err := kubernetes.NewForConfig(config)
+	dynClient, err := dynamic.NewForConfig(config)
 	if err != nil {
-		log.Fatalf("Failed to create kubernetes client: %v", err)
+		log.Fatalf("Failed to create dynamic client: %v", err)
 	}
 
 	ctx := context.Background()
@@ -63,13 +76,13 @@ func main() {
 	// Handle Istio workload restarts first
 	log.Println("Restarting Istio workloads...")
 	for _, workload := range istioWorkloads {
-		if err := restartIstioWorkload(ctx, clientset, workload); err != nil {
+		if err := restartIstioWorkload(ctx, dynClient, workload); err != nil {
 			log.Printf("Failed to restart %s %s: %v", workload.Type, workload.Name, err)
 		}
 	}
 
 	// Get list of namespaces to process
-	namespaces, err := getNamespaces(ctx, clientset, *namespace, *allNamespaces)
+	namespaces, err := getNamespaces(ctx, dynClient, *namespace, *allNamespaces)
 	if err != nil {
 		log.Fatalf("Failed to get namespaces: %v", err)
 	}
@@ -79,7 +92,7 @@ func main() {
 	// Process pods in each namespace
 	processedPods := 0
 	for _, ns := range namespaces {
-		count, err := processPodsInNamespace(ctx, clientset, ns)
+		count, err := processPodsInNamespace(ctx, dynClient, ns)
 		if err != nil {
 			log.Printf("Error processing pods in namespace %s: %v", ns, err)
 			continue
@@ -91,65 +104,33 @@ func main() {
 }
 
 // restartIstioWorkload handles the restart of a specific Istio workload
-func restartIstioWorkload(ctx context.Context, clientset *kubernetes.Clientset, workload IstioWorkload) error {
+func restartIstioWorkload(ctx context.Context, dynClient dynamic.Interface, workload IstioWorkload) error {
 	switch workload.Type {
 	case DeploymentType:
-		dep, err := clientset.AppsV1().Deployments(istioNamespace).Get(ctx, workload.Name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to get deployment %s: %v", workload.Name, err)
-		}
-
-		dep.Spec.Template.Annotations = addRestartAnnotation(dep.Spec.Template.Annotations)
-		_, err = clientset.AppsV1().Deployments(istioNamespace).Update(ctx, dep, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to update deployment %s: %v", workload.Name, err)
-		}
-		log.Printf("Successfully restarted Deployment %s in namespace %s", workload.Name, istioNamespace)
-
+		return restartWorkload(ctx, dynClient, istioNamespace, workload.Name, "Deployment")
 	case DaemonSetType:
-		ds, err := clientset.AppsV1().DaemonSets(istioNamespace).Get(ctx, workload.Name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to get daemonset %s: %v", workload.Name, err)
-		}
-
-		ds.Spec.Template.Annotations = addRestartAnnotation(ds.Spec.Template.Annotations)
-		_, err = clientset.AppsV1().DaemonSets(istioNamespace).Update(ctx, ds, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to update daemonset %s: %v", workload.Name, err)
-		}
-		log.Printf("Successfully restarted DaemonSet %s in namespace %s", workload.Name, istioNamespace)
-
+		return restartWorkload(ctx, dynClient, istioNamespace, workload.Name, "DaemonSet")
 	default:
 		return fmt.Errorf("unsupported workload type: %s", workload.Type)
 	}
-
-	return nil
-}
-
-// addRestartAnnotation adds or updates the restart annotation with current timestamp
-func addRestartAnnotation(annotations map[string]string) map[string]string {
-	if annotations == nil {
-		annotations = make(map[string]string)
-	}
-	annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
-	return annotations
 }
 
 // getNamespaces returns the list of namespaces to process
-func getNamespaces(ctx context.Context, clientset *kubernetes.Clientset, namespace string, allNamespaces bool) ([]string, error) {
+func getNamespaces(ctx context.Context, dynClient dynamic.Interface, namespace string, allNamespaces bool) ([]string, error) {
 	if allNamespaces {
-		namespaceList, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+		nsList, err := dynClient.Resource(namespaceGVR).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to list namespaces: %v", err)
 		}
 
-		namespaces := make([]string, 0, len(namespaceList.Items))
-		for _, ns := range namespaceList.Items {
+		namespaces := make([]string, 0, len(nsList.Items))
+		for _, ns := range nsList.Items {
+			name := ns.GetName()
 			// Skip system namespaces that typically don't have user workloads
-			if ns.Name == "kube-system" || ns.Name == "kube-public" || ns.Name == "kube-node-lease" {
+			if name == "kube-system" || name == "kube-public" || name == "kube-node-lease" {
 				continue
 			}
-			namespaces = append(namespaces, ns.Name)
+			namespaces = append(namespaces, name)
 		}
 		return namespaces, nil
 	}
@@ -157,32 +138,40 @@ func getNamespaces(ctx context.Context, clientset *kubernetes.Clientset, namespa
 }
 
 // hasIstioSidecar checks if a pod has Istio sidecar injection
-func hasIstioSidecar(pod *corev1.Pod) bool {
-	// Check for istio-init init container
-	for _, container := range pod.Spec.InitContainers {
-		if container.Name == "istio-init" || container.Name == "istio-validation" {
+func hasIstioSidecar(pod *unstructured.Unstructured) bool {
+	initContainers, found, err := unstructured.NestedSlice(pod.Object, "spec", "initContainers")
+	if !found || err != nil {
+		return false
+	}
+	for _, c := range initContainers {
+		container, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(container, "name")
+		if name == "istio-init" || name == "istio-validation" {
 			return true
 		}
 	}
-
 	return false
 }
 
 // processPodsInNamespace processes all pods in a given namespace and returns count of processed pods
-func processPodsInNamespace(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (int, error) {
-	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+func processPodsInNamespace(ctx context.Context, dynClient dynamic.Interface, namespace string) (int, error) {
+	pods, err := dynClient.Resource(podGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return 0, fmt.Errorf("failed to list pods in namespace %s: %v", namespace, err)
 	}
 
 	processedCount := 0
-	for _, pod := range pods.Items {
-		if !hasIstioSidecar(&pod) {
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if !hasIstioSidecar(pod) {
 			continue // Skip pods without Istio sidecar
 		}
 
-		if err := processPod(ctx, clientset, &pod); err != nil {
-			log.Printf("Error processing pod %s/%s: %v", namespace, pod.Name, err)
+		if err := processPod(ctx, dynClient, pod); err != nil {
+			log.Printf("Error processing pod %s/%s: %v", namespace, pod.GetName(), err)
 			continue
 		}
 		processedCount++
@@ -195,40 +184,43 @@ func processPodsInNamespace(ctx context.Context, clientset *kubernetes.Clientset
 	return processedCount, nil
 }
 
-func processPod(ctx context.Context, clientset *kubernetes.Clientset, pod *corev1.Pod) error {
-	log.Printf("Processing pod %s/%s with Istio sidecar", pod.Namespace, pod.Name)
+func processPod(ctx context.Context, dynClient dynamic.Interface, pod *unstructured.Unstructured) error {
+	log.Printf("Processing pod %s/%s with Istio sidecar", pod.GetNamespace(), pod.GetName())
 
-	if len(pod.OwnerReferences) == 0 {
-		log.Printf("Skipping pod %s/%s: no owner references", pod.Namespace, pod.Name)
+	ownerRefs := pod.GetOwnerReferences()
+	if len(ownerRefs) == 0 {
+		log.Printf("Skipping pod %s/%s: no owner references", pod.GetNamespace(), pod.GetName())
 		return nil
 	}
 
-	return traverseOwners(ctx, clientset, pod.Namespace, pod.OwnerReferences[0])
+	return traverseOwners(ctx, dynClient, pod.GetNamespace(), ownerRefs[0])
 }
 
-func traverseOwners(ctx context.Context, clientset *kubernetes.Clientset, namespace string, ownerRef metav1.OwnerReference) error {
+func traverseOwners(ctx context.Context, dynClient dynamic.Interface, namespace string, ownerRef metav1.OwnerReference) error {
 	switch ownerRef.Kind {
 	case "ReplicaSet":
-		// Get the ReplicaSet
-		rs, err := clientset.AppsV1().ReplicaSets(namespace).Get(ctx, ownerRef.Name, metav1.GetOptions{})
+		rs, err := dynClient.Resource(replicasetGVR).Namespace(namespace).Get(ctx, ownerRef.Name, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("failed to get ReplicaSet %s: %v", ownerRef.Name, err)
 		}
 
-		// Check if ReplicaSet has an owner (Deployment)
-		if len(rs.OwnerReferences) > 0 {
-			return traverseOwners(ctx, clientset, namespace, rs.OwnerReferences[0])
+		owners := rs.GetOwnerReferences()
+		if len(owners) > 0 {
+			return traverseOwners(ctx, dynClient, namespace, owners[0])
 		}
 		log.Printf("ReplicaSet %s/%s has no owner references", namespace, ownerRef.Name)
 
 	case "Deployment":
-		return restartWorkload(ctx, clientset, namespace, ownerRef.Name, "Deployment")
+		return restartWorkload(ctx, dynClient, namespace, ownerRef.Name, "Deployment")
 
 	case "DaemonSet":
-		return restartWorkload(ctx, clientset, namespace, ownerRef.Name, "DaemonSet")
+		return restartWorkload(ctx, dynClient, namespace, ownerRef.Name, "DaemonSet")
 
 	case "StatefulSet":
-		return restartWorkload(ctx, clientset, namespace, ownerRef.Name, "StatefulSet")
+		return restartWorkload(ctx, dynClient, namespace, ownerRef.Name, "StatefulSet")
+
+	case "Rollout":
+		return restartRollout(ctx, dynClient, namespace, ownerRef.Name)
 
 	default:
 		log.Printf("Unsupported owner kind: %s for %s/%s", ownerRef.Kind, namespace, ownerRef.Name)
@@ -238,53 +230,61 @@ func traverseOwners(ctx context.Context, clientset *kubernetes.Clientset, namesp
 }
 
 // restartWorkload handles restarting different types of workloads
-func restartWorkload(ctx context.Context, clientset *kubernetes.Clientset, namespace, name, kind string) error {
+func restartWorkload(ctx context.Context, dynClient dynamic.Interface, namespace, name, kind string) error {
+	var gvr schema.GroupVersionResource
 	switch kind {
 	case "Deployment":
-		deployment, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to get Deployment %s: %v", name, err)
-		}
-
-		deployment.Spec.Template.Annotations = addRestartAnnotation(deployment.Spec.Template.Annotations)
-		_, err = clientset.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to update Deployment %s: %v", name, err)
-		}
-
-		log.Printf("Successfully restarted Deployment %s in namespace %s", name, namespace)
-
+		gvr = deploymentGVR
 	case "DaemonSet":
-		daemonset, err := clientset.AppsV1().DaemonSets(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to get DaemonSet %s: %v", name, err)
-		}
-
-		daemonset.Spec.Template.Annotations = addRestartAnnotation(daemonset.Spec.Template.Annotations)
-		_, err = clientset.AppsV1().DaemonSets(namespace).Update(ctx, daemonset, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to update DaemonSet %s: %v", name, err)
-		}
-
-		log.Printf("Successfully restarted DaemonSet %s in namespace %s", name, namespace)
-
+		gvr = daemonsetGVR
 	case "StatefulSet":
-		statefulset, err := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to get StatefulSet %s: %v", name, err)
-		}
-
-		statefulset.Spec.Template.Annotations = addRestartAnnotation(statefulset.Spec.Template.Annotations)
-		_, err = clientset.AppsV1().StatefulSets(namespace).Update(ctx, statefulset, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to update StatefulSet %s: %v", name, err)
-		}
-
-		log.Printf("Successfully restarted StatefulSet %s in namespace %s", name, namespace)
-
+		gvr = statefulsetGVR
 	default:
 		return fmt.Errorf("unsupported workload kind: %s", kind)
 	}
 
+	obj, err := dynClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get %s %s: %v", kind, name, err)
+	}
+
+	annotations, _, _ := unstructured.NestedStringMap(obj.Object, "spec", "template", "metadata", "annotations")
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
+
+	if err := unstructured.SetNestedStringMap(obj.Object, annotations, "spec", "template", "metadata", "annotations"); err != nil {
+		return fmt.Errorf("failed to set annotations on %s %s: %v", kind, name, err)
+	}
+
+	_, err = dynClient.Resource(gvr).Namespace(namespace).Update(ctx, obj, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update %s %s: %v", kind, name, err)
+	}
+
+	log.Printf("Successfully restarted %s %s in namespace %s", kind, name, namespace)
+	return nil
+}
+
+// restartRollout restarts an Argo Rollout by patching spec.restartAt
+func restartRollout(ctx context.Context, dynClient dynamic.Interface, namespace, name string) error {
+	patch := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"restartAt": time.Now().Format(time.RFC3339),
+		},
+	}
+
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("failed to marshal patch for Rollout %s: %v", name, err)
+	}
+
+	_, err = dynClient.Resource(rolloutGVR).Namespace(namespace).Patch(ctx, name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to patch Rollout %s: %v", name, err)
+	}
+
+	log.Printf("Successfully restarted Rollout %s in namespace %s", name, namespace)
 	return nil
 }
