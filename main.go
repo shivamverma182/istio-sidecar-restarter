@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,6 +16,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/homedir"
 )
 
 // WorkloadType represents the type of Kubernetes workload
@@ -49,10 +53,46 @@ var (
 	rolloutGVR     = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "rollouts"}
 )
 
+// getKubeConfig creates a Kubernetes config, trying in-cluster first, then falling back to kubeconfig file
+func getKubeConfig(kubeconfigPath string) (*rest.Config, error) {
+	// If a specific kubeconfig path is provided, use it
+	if kubeconfigPath != "" {
+		log.Printf("Using kubeconfig file: %s", kubeconfigPath)
+		return clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	}
+
+	// Try in-cluster config first
+	config, err := rest.InClusterConfig()
+	if err == nil {
+		log.Println("Using in-cluster configuration")
+		return config, nil
+	}
+
+	log.Printf("In-cluster config not available: %v", err)
+	log.Println("Falling back to kubeconfig file")
+
+	// Fall back to kubeconfig file
+	var kubeconfig string
+	if home := homedir.HomeDir(); home != "" {
+		kubeconfig = filepath.Join(home, ".kube", "config")
+	} else {
+		return nil, fmt.Errorf("unable to determine home directory and in-cluster config failed")
+	}
+
+	// Check if kubeconfig file exists
+	if _, err := os.Stat(kubeconfig); os.IsNotExist(err) {
+		return nil, fmt.Errorf("kubeconfig file not found at %s and in-cluster config failed", kubeconfig)
+	}
+
+	log.Printf("Using kubeconfig file: %s", kubeconfig)
+	return clientcmd.BuildConfigFromFlags("", kubeconfig)
+}
+
 func main() {
 	// Parse command line flags
 	namespace := flag.String("namespace", "", "namespace to search pods in")
 	allNamespaces := flag.Bool("all-namespaces", false, "search pods in all namespaces")
+	kubeconfig := flag.String("kubeconfig", "", "path to kubeconfig file (optional, defaults to ~/.kube/config if not running in-cluster)")
 	flag.Parse()
 
 	// Validate namespace configuration
@@ -61,9 +101,9 @@ func main() {
 	}
 
 	// Setup kubernetes client
-	config, err := rest.InClusterConfig()
+	config, err := getKubeConfig(*kubeconfig)
 	if err != nil {
-		log.Fatalf("Failed to get in-cluster config: %v", err)
+		log.Fatalf("Failed to get kubernetes config: %v", err)
 	}
 
 	dynClient, err := dynamic.NewForConfig(config)
