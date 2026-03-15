@@ -14,6 +14,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -28,6 +30,13 @@ jobs:
       - name: Create and push tag
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          TAG="v$(date +'%Y%m%d%H%M%S')"
+          BASE=$(cat VERSION | tr -d '[:space:]')
+          LAST=$(git tag -l "${BASE}.*" | sort -t. -k3 -n | tail -1)
+          if [ -z "$LAST" ]; then
+            PATCH=0
+          else
+            PATCH=$(echo "$LAST" | awk -F. '{print $NF + 1}')
+          fi
+          TAG="${BASE}.${PATCH}"
           git tag "$TAG"
           git push origin "$TAG"
