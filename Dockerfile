@@ -4,15 +4,8 @@ FROM golang:1.26-alpine AS builder
 # Set working directory
 WORKDIR /app
 
-COPY cloudflare.crt /tmp
-
-RUN cat /tmp/cloudflare.crt >> /etc/ssl/certs/ca-certificates.crt
-
 # Add CA certificates for HTTPS
 RUN apk --no-cache add ca-certificates bash && update-ca-certificates
-
-RUN cp /tmp/cloudflare.crt /usr/local/share/ca-certificates/cloudflare.crt && update-ca-certificates
-
 
 # Copy go mod files
 COPY go.mod ./
@@ -29,15 +22,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o pod-restarter
 # Final stage
 FROM alpine:3.20
 
-COPY cloudflare.crt /tmp
-
-# Copy certificate bundle
-RUN cat /tmp/cloudflare.crt >> /etc/ssl/certs/ca-certificates.crt
-
 # Add CA certificates for HTTPS
 RUN apk --no-cache add ca-certificates bash && update-ca-certificates
-
-RUN cp /tmp/cloudflare.crt /usr/local/share/ca-certificates/cloudflare.crt && update-ca-certificates
 
 # Create non-root user
 RUN adduser -D -u 10001 appuser
