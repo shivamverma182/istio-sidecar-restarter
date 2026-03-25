@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -19,6 +20,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 )
+
+var logger *zap.Logger
 
 // WorkloadType represents the type of Kubernetes workload
 type WorkloadType string
@@ -57,19 +60,18 @@ var (
 func getKubeConfig(kubeconfigPath string) (*rest.Config, error) {
 	// If a specific kubeconfig path is provided, use it
 	if kubeconfigPath != "" {
-		log.Printf("Using kubeconfig file: %s", kubeconfigPath)
+		logger.Info("Using kubeconfig file", zap.String("path", kubeconfigPath))
 		return clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 	}
 
 	// Try in-cluster config first
 	config, err := rest.InClusterConfig()
 	if err == nil {
-		log.Println("Using in-cluster configuration")
+		logger.Info("Using in-cluster configuration")
 		return config, nil
 	}
 
-	log.Printf("In-cluster config not available: %v", err)
-	log.Println("Falling back to kubeconfig file")
+	logger.Warn("In-cluster config not available, falling back to kubeconfig file", zap.Error(err))
 
 	// Fall back to kubeconfig file
 	var kubeconfig string
@@ -84,11 +86,26 @@ func getKubeConfig(kubeconfigPath string) (*rest.Config, error) {
 		return nil, fmt.Errorf("kubeconfig file not found at %s and in-cluster config failed", kubeconfig)
 	}
 
-	log.Printf("Using kubeconfig file: %s", kubeconfig)
+	logger.Info("Using kubeconfig file", zap.String("path", kubeconfig))
 	return clientcmd.BuildConfigFromFlags("", kubeconfig)
 }
 
 func main() {
+	// Initialize Zap logger with JSON output
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.TimeKey = "timestamp"
+	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	encoderConfig.MessageKey = "message"
+	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderConfig),
+		zapcore.AddSync(os.Stdout),
+		zapcore.InfoLevel,
+	)
+	logger = zap.New(core)
+	defer logger.Sync()
+
 	// Parse command line flags
 	namespace := flag.String("namespace", "", "namespace to search pods in")
 	allNamespaces := flag.Bool("all-namespaces", false, "search pods in all namespaces")
@@ -97,50 +114,61 @@ func main() {
 
 	// Validate namespace configuration
 	if *namespace == "" && !*allNamespaces {
-		log.Fatalf("Must specify either -namespace or -all-namespaces")
+		logger.Error("Must specify either -namespace or -all-namespaces")
+		os.Exit(1)
 	}
 
 	// Setup kubernetes client
 	config, err := getKubeConfig(*kubeconfig)
 	if err != nil {
-		log.Fatalf("Failed to get kubernetes config: %v", err)
+		logger.Error("Failed to get kubernetes config", zap.Error(err))
+		os.Exit(1)
 	}
+
+	// Suppress all Kubernetes API server deprecation warnings
+	rest.SetDefaultWarningHandler(rest.NoWarnings{})
+	config.WarningHandler = rest.NoWarnings{}
 
 	dynClient, err := dynamic.NewForConfig(config)
 	if err != nil {
-		log.Fatalf("Failed to create dynamic client: %v", err)
+		logger.Error("Failed to create dynamic client", zap.Error(err))
+		os.Exit(1)
 	}
 
 	ctx := context.Background()
 
 	// Handle Istio workload restarts first
-	log.Println("Restarting Istio workloads...")
+	logger.Info("Restarting Istio workloads...")
 	for _, workload := range istioWorkloads {
 		if err := restartIstioWorkload(ctx, dynClient, workload); err != nil {
-			log.Printf("Failed to restart %s %s: %v", workload.Type, workload.Name, err)
+			logger.Error("Failed to restart Istio workload",
+				zap.String("workload_type", string(workload.Type)),
+				zap.String("workload_name", workload.Name),
+				zap.Error(err))
 		}
 	}
 
 	// Get list of namespaces to process
 	namespaces, err := getNamespaces(ctx, dynClient, *namespace, *allNamespaces)
 	if err != nil {
-		log.Fatalf("Failed to get namespaces: %v", err)
+		logger.Error("Failed to get namespaces", zap.Error(err))
+		os.Exit(1)
 	}
 
-	log.Printf("Processing %d namespaces for Istio sidecar restarts", len(namespaces))
+	logger.Info("Processing namespaces for Istio sidecar restarts", zap.Int("count", len(namespaces)))
 
 	// Process pods in each namespace
 	processedPods := 0
 	for _, ns := range namespaces {
 		count, err := processPodsInNamespace(ctx, dynClient, ns)
 		if err != nil {
-			log.Printf("Error processing pods in namespace %s: %v", ns, err)
+			logger.Error("Error processing pods in namespace", zap.String("namespace", ns), zap.Error(err))
 			continue
 		}
 		processedPods += count
 	}
 
-	log.Printf("Successfully processed %d pods with Istio sidecars", processedPods)
+	logger.Info("Successfully processed pods with Istio sidecars", zap.Int("count", processedPods))
 }
 
 // restartIstioWorkload handles the restart of a specific Istio workload
@@ -211,25 +239,34 @@ func processPodsInNamespace(ctx context.Context, dynClient dynamic.Interface, na
 		}
 
 		if err := processPod(ctx, dynClient, pod); err != nil {
-			log.Printf("Error processing pod %s/%s: %v", namespace, pod.GetName(), err)
+			logger.Error("Error processing pod",
+				zap.String("namespace", namespace),
+				zap.String("pod", pod.GetName()),
+				zap.Error(err))
 			continue
 		}
 		processedCount++
 	}
 
 	if processedCount > 0 {
-		log.Printf("Processed %d pods with Istio sidecars in namespace %s", processedCount, namespace)
+		logger.Info("Processed pods with Istio sidecars",
+			zap.String("namespace", namespace),
+			zap.Int("count", processedCount))
 	}
 
 	return processedCount, nil
 }
 
 func processPod(ctx context.Context, dynClient dynamic.Interface, pod *unstructured.Unstructured) error {
-	log.Printf("Processing pod %s/%s with Istio sidecar", pod.GetNamespace(), pod.GetName())
+	logger.Info("Processing pod with Istio sidecar",
+		zap.String("namespace", pod.GetNamespace()),
+		zap.String("pod", pod.GetName()))
 
 	ownerRefs := pod.GetOwnerReferences()
 	if len(ownerRefs) == 0 {
-		log.Printf("Skipping pod %s/%s: no owner references", pod.GetNamespace(), pod.GetName())
+		logger.Info("Skipping pod: no owner references",
+			zap.String("namespace", pod.GetNamespace()),
+			zap.String("pod", pod.GetName()))
 		return nil
 	}
 
@@ -248,7 +285,9 @@ func traverseOwners(ctx context.Context, dynClient dynamic.Interface, namespace 
 		if len(owners) > 0 {
 			return traverseOwners(ctx, dynClient, namespace, owners[0])
 		}
-		log.Printf("ReplicaSet %s/%s has no owner references", namespace, ownerRef.Name)
+		logger.Info("ReplicaSet has no owner references",
+			zap.String("namespace", namespace),
+			zap.String("replicaset", ownerRef.Name))
 
 	case "Deployment":
 		return restartWorkload(ctx, dynClient, namespace, ownerRef.Name, "Deployment")
@@ -263,7 +302,10 @@ func traverseOwners(ctx context.Context, dynClient dynamic.Interface, namespace 
 		return restartRollout(ctx, dynClient, namespace, ownerRef.Name)
 
 	default:
-		log.Printf("Unsupported owner kind: %s for %s/%s", ownerRef.Kind, namespace, ownerRef.Name)
+		logger.Warn("Unsupported owner kind",
+			zap.String("kind", ownerRef.Kind),
+			zap.String("namespace", namespace),
+			zap.String("owner", ownerRef.Name))
 	}
 
 	return nil
@@ -303,7 +345,10 @@ func restartWorkload(ctx context.Context, dynClient dynamic.Interface, namespace
 		return fmt.Errorf("failed to update %s %s: %v", kind, name, err)
 	}
 
-	log.Printf("Successfully restarted %s %s in namespace %s", kind, name, namespace)
+	logger.Info("Successfully restarted workload",
+		zap.String("kind", kind),
+		zap.String("name", name),
+		zap.String("namespace", namespace))
 	return nil
 }
 
@@ -325,6 +370,8 @@ func restartRollout(ctx context.Context, dynClient dynamic.Interface, namespace,
 		return fmt.Errorf("failed to patch Rollout %s: %v", name, err)
 	}
 
-	log.Printf("Successfully restarted Rollout %s in namespace %s", name, namespace)
+	logger.Info("Successfully restarted Rollout",
+		zap.String("name", name),
+		zap.String("namespace", namespace))
 	return nil
 }

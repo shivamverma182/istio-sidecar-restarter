@@ -40,11 +40,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get latest tag
+      - name: Generate image tag
         id: tag
         run: |
-          git fetch --tags
-          echo "name=$(git tag --sort=-version:refname | head -1)" >> $GITHUB_OUTPUT
+          echo "name=$(date +'%Y.%m.%d').$(printf '%02d' ${{ github.run_number }})" >> $GITHUB_OUTPUT
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
