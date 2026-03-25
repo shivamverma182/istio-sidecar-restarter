@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "istio-sidecar-restarter.fullname" . }}
+  labels:
+    {{- include "istio-sidecar-restarter.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "istio-sidecar-restarter.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "istio-sidecar-restarter.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io
+

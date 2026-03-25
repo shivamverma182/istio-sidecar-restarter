@@ -1,0 +1,36 @@
+image:
+  repository: ghcr.io/shivamverma182/istio-sidecar-restarter
+  tag: main
+  pullPolicy: Always
+
+schedule: "0 0 * * *"
+
+args:
+  - "--all-namespaces"
+
+suspend: true
+concurrencyPolicy: Forbid
+successfulJobsHistoryLimit: 3
+failedJobsHistoryLimit: 1
+restartPolicy: OnFailure
+
+serviceAccount:
+  create: true
+  name: ""
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "64Mi"
+  limits:
+    cpu: "200m"
+    memory: "128Mi"
+
+securityContext:
+  allowPrivilegeEscalation: false
+  runAsNonRoot: true
+  runAsUser: 10001
+  capabilities:
+    drop:
+      - ALL
+

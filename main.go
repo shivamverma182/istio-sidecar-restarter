@@ -311,7 +311,8 @@ func traverseOwners(ctx context.Context, dynClient dynamic.Interface, namespace 
 	return nil
 }
 
-// restartWorkload handles restarting different types of workloads
+// restartWorkload handles restarting different types of workloads using a strategic merge patch
+// to avoid "Operation cannot be fulfilled" conflict errors caused by Get-then-Update pattern.
 func restartWorkload(ctx context.Context, dynClient dynamic.Interface, namespace, name, kind string) error {
 	var gvr schema.GroupVersionResource
 	switch kind {
@@ -325,24 +326,26 @@ func restartWorkload(ctx context.Context, dynClient dynamic.Interface, namespace
 		return fmt.Errorf("unsupported workload kind: %s", kind)
 	}
 
-	obj, err := dynClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	patch := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"template": map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"annotations": map[string]interface{}{
+						"kubectl.kubernetes.io/restartedAt": time.Now().Format(time.RFC3339),
+					},
+				},
+			},
+		},
+	}
+
+	patchBytes, err := json.Marshal(patch)
 	if err != nil {
-		return fmt.Errorf("failed to get %s %s: %v", kind, name, err)
+		return fmt.Errorf("failed to marshal patch for %s %s: %v", kind, name, err)
 	}
 
-	annotations, _, _ := unstructured.NestedStringMap(obj.Object, "spec", "template", "metadata", "annotations")
-	if annotations == nil {
-		annotations = make(map[string]string)
-	}
-	annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
-
-	if err := unstructured.SetNestedStringMap(obj.Object, annotations, "spec", "template", "metadata", "annotations"); err != nil {
-		return fmt.Errorf("failed to set annotations on %s %s: %v", kind, name, err)
-	}
-
-	_, err = dynClient.Resource(gvr).Namespace(namespace).Update(ctx, obj, metav1.UpdateOptions{})
+	_, err = dynClient.Resource(gvr).Namespace(namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to update %s %s: %v", kind, name, err)
+		return fmt.Errorf("failed to patch %s %s: %v", kind, name, err)
 	}
 
 	logger.Info("Successfully restarted workload",
