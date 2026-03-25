@@ -30,13 +30,6 @@ jobs:
       - name: Create and push tag
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          BASE=$(cat VERSION | tr -d '[:space:]')
-          LAST=$(git tag -l "${BASE}.*" | sort -t. -k3 -n | tail -1)
-          if [ -z "$LAST" ]; then
-            PATCH=0
-          else
-            PATCH=$(echo "$LAST" | awk -F. '{print $NF + 1}')
-          fi
-          TAG="${BASE}.${PATCH}"
+          TAG="$(date +'%Y.%m.%d').$(printf '%02d' ${{ github.run_number }})"
           git tag "$TAG"
           git push origin "$TAG"
