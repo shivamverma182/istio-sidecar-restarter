@@ -42,6 +42,9 @@ var istioWorkloads = []IstioWorkload{
 	{Name: "istiod", Type: DeploymentType},
 	{Name: "istio-ingressgateway", Type: DeploymentType},
 	{Name: "istio-cni-node", Type: DaemonSetType},
+	{Name: "istio-api-ingressgateway", Type: DeploymentType},
+	{Name: "istio-eastwest-gateway", Type: DeploymentType},
+	{Name: "istio-csr", Type: DeploymentType},
 }
 
 var istioNamespace = "istio-system"
