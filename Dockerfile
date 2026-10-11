@@ -1,8 +1,5 @@
 FROM alpine:3
 
-# Add CA certificates for HTTPS
-RUN apk --no-cache add ca-certificates bash && update-ca-certificates
-
 # Create non-root user
 RUN adduser -D -u 10001 appuser
 
