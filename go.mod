@@ -1,6 +1,6 @@
 module github.com/shivam/pod_restarter
 
-go 1.26.0
+go 1.27.2
 
 require (
 	go.uber.org/zap v1.27.1
